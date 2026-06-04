@@ -1,0 +1,4 @@
+target/
+*.rpm
+*.tar.xz
+at-spi2-core-*/
