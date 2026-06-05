@@ -1,48 +1,60 @@
 # java-a11y-bridge
 
-A pure Java AT-SPI2 accessibility bridge for Swing and JavaFX applications on Linux.
+Pure Java AT-SPI2 accessibility for Swing and JavaFX applications on Linux. Zero native code.
 
 ## What it does
 
-java-a11y-bridge replaces [java-atk-wrapper](https://gitlab.gnome.org/GNOME/java-atk-wrapper) — the existing JNI/ATK-based accessibility bridge that is barely maintained and requires native C compilation per architecture.
+Replaces [java-atk-wrapper](https://gitlab.gnome.org/GNOME/java-atk-wrapper) — the existing JNI/ATK-based accessibility bridge that is barely maintained and requires native C compilation per architecture.
 
-This bridge talks directly to AT-SPI2 over D-Bus using [dbus-java](https://github.com/hypfvieh/dbus-java), with zero native code. It makes Java applications accessible to screen readers (Orca), accessibility inspectors (Accerciser), and testing tools (Dogtail) on any Linux desktop.
+This project talks directly to AT-SPI2 over D-Bus using [dbus-java](https://github.com/hypfvieh/dbus-java). It makes Java applications accessible to screen readers (Orca), accessibility inspectors (Accerciser), and testing tools (Dogtail) on any Linux desktop.
+
+There are two modules:
+
+- **java-a11y-bridge** — the core bridge that translates `javax.accessibility` to AT-SPI2 D-Bus protocol. Works with Swing apps out of the box.
+- **javafx-a11y-adapter** — translates JavaFX's `AccessibleAttribute`/`AccessibleAction` API to `javax.accessibility`, feeding it into the bridge. Activated via `-javaagent` with no app code changes. This exists because JavaFX on Linux has [no built-in accessibility](https://wiki.openjdk.org/display/wakefield) — `GtkApplication.createAccessible()` returns null.
 
 ## Architecture
 
 ```
-javax.accessibility (Swing/JavaFX)
-        |
-  java-a11y-bridge
-        |
-    dbus-java (D-Bus protocol)
-        |
-  AT-SPI2 (Linux accessibility)
-        |
-  Orca / Accerciser / Dogtail
+Swing app                          JavaFX app
+    |                                  |
+javax.accessibility              AccessibleAttribute
+    |                                  |
+    |                          javafx-a11y-adapter
+    |                          (javaagent, no code changes)
+    |                                  |
+    +----------------------------------+
+    |
+java-a11y-bridge
+(javax.accessibility -> D-Bus)
+    |
+dbus-java
+    |
+AT-SPI2 D-Bus protocol
+    |
+Orca / Accerciser / Dogtail
 ```
-
-## Features
-
-- **Zero native code** — single JAR, no JNI, no C compilation, no `--enable-native-access`
-- **10 AT-SPI2 interfaces**: Accessible, Component, Action, Value, Selection, Text, Image, Table, Application, Properties
-- **Event forwarding**: focus, state changes, text caret movement, window lifecycle, property changes
-- **48 role mappings**, 28 state mappings, relation support
-- **Works with any Swing app** — no code changes needed in the application
-- Tested with SwingSet2 and custom Swing applications via Accerciser
 
 ## Requirements
 
 - JDK 21+
-- Linux with D-Bus and AT-SPI2 (any desktop: GNOME, KDE, Sway, etc.)
+- Linux with D-Bus and AT-SPI2 (any desktop — GNOME, KDE, Sway, Hyprland, etc.)
+- dbus-java 5.2.0 (pulled automatically by Maven)
 
 ## Building
 
 ```bash
+# Build the bridge and install to local Maven repo
+mvn clean install
+
+# Build the JavaFX adapter
+cd javafx-a11y-adapter
 mvn clean package
 ```
 
 ## Usage
+
+### Swing applications
 
 Add the bridge JAR and its dependencies to your classpath, then set the assistive technologies property:
 
@@ -53,28 +65,78 @@ java \
   your.MainClass
 ```
 
-Or create an `accessibility.properties` file in `$JAVA_HOME/conf/`:
+Or set it system-wide in `$JAVA_HOME/conf/accessibility.properties`:
 
 ```properties
 assistive_technologies=org.a11y.bridge.A11yBridge
 ```
 
-## How it works
+No application code changes are needed.
 
-1. `A11yProvider` implements `javax.accessibility.AccessibilityProvider` (SPI)
-2. On activation, it connects to the AT-SPI2 bus via `org.a11y.Bus.GetAddress()`
-3. Registers the application via `org.a11y.atspi.Socket.Embed`
-4. Exports each Swing `AccessibleContext` as a D-Bus object at `/org/a11y/atspi/accessible/<id>`
-5. Serves accessible properties via `org.freedesktop.DBus.Properties`
-6. Forwards AWT/Swing events as AT-SPI2 D-Bus signals
+### JavaFX applications
+
+Add both JARs to the classpath and use `-javaagent`:
+
+```bash
+java \
+  --module-path /path/to/javafx/lib --add-modules javafx.controls \
+  -javaagent:javafx-a11y-adapter.jar \
+  -cp "your-app.jar:javafx-a11y-adapter.jar:java-a11y-bridge.jar:dbus-java-core.jar:dbus-java-transport-native-unixsocket.jar:slf4j-api.jar" \
+  your.MainClass
+```
+
+No application code changes are needed. The agent automatically detects JavaFX windows, walks the scene graph, and registers all nodes with the AT-SPI2 bridge.
+
+## What's implemented
+
+### AT-SPI2 interfaces (bridge)
+
+| Interface | Status |
+|---|---|
+| Accessible | Properties, tree traversal, roles, states, relations |
+| Component | Position, size, layer, focus |
+| Action | Click, toggle, activate |
+| Text | Read content, caret tracking, selection |
+| Value | Current/min/max values |
+| Selection | Select/deselect children |
+| Table | Row/column count, cell access, headers, selection |
+| Image | Description, locale |
+| Application | Toolkit name, version, PID |
+| Properties | D-Bus property access for all interfaces |
+
+### Event forwarding
+
+- Focus and state changes (focused, checked, selected, enabled, expanded)
+- Text caret movement
+- Window activate/deactivate
+- Property changes (name, description, value)
+- Children added/removed
+
+### JavaFX adapter
+
+- 49 JavaFX `AccessibleRole` → `javax.accessibility.AccessibleRole` mappings
+- Full scene graph traversal with dynamic child tracking
+- Automatic window detection via `Window.getWindows()` listener
+- AccessibleComponent, AccessibleAction, AccessibleText, AccessibleValue translation
+- Focus/visibility/disabled state forwarding via JavaFX property listeners
+
+## Tested with
+
+- **RetroApp** — custom Swing app (44 nodes: buttons, text fields, menus, radio buttons, checkboxes, scroll panes)
+- **SwingSet2** — JDK's Swing demo with every widget type
+- **HelloWorldFX** — minimal JavaFX app (4 nodes, zero code changes)
+- **FxTestApp** — complex JavaFX app (446 nodes: tabs, tables, trees, forms, sliders, spinners, lists)
+
+All verified via Accerciser and AT-SPI2 queries.
 
 ## Known limitations
 
-- Tree doesn't auto-refresh on dynamic UI changes (e.g., tab switches in tabbed panes)
+- Dynamic UI changes (e.g., tab switches) don't always trigger tree refresh in Accerciser
 - TableCell interface not implemented
 - Hyperlink/Hypertext not implemented
-- No Cache interface for bulk tree loading (performance optimization for large UIs)
-- Orca integration not yet tested (Orca crashes on the test system due to Python 3.14 incompatibility)
+- No Cache interface for bulk tree loading
+- Orca not tested (crashes on test system due to Python 3.14 incompatibility, unrelated to bridge)
+- JavaFX adapter requires `-javaagent` flag (cannot use `assistive_technologies` property because JavaFX doesn't initialize AWT toolkit)
 
 ## License
 
