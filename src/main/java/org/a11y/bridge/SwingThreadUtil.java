@@ -4,6 +4,8 @@ import javax.swing.SwingUtilities;
 import java.util.concurrent.Callable;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.RunnableFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 public final class SwingThreadUtil {
 
@@ -20,7 +22,10 @@ public final class SwingThreadUtil {
         RunnableFuture<T> task = new FutureTask<>(fn);
         SwingUtilities.invokeLater(task);
         try {
-            return task.get();
+            return task.get(2, TimeUnit.SECONDS);
+        } catch (TimeoutException e) {
+            task.cancel(true);
+            return defaultValue;
         } catch (Exception e) {
             return defaultValue;
         }

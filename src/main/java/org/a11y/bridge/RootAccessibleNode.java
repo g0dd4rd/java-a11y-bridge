@@ -7,6 +7,7 @@ import org.freedesktop.dbus.types.UInt32;
 import org.freedesktop.dbus.types.Variant;
 
 import javax.accessibility.Accessible;
+import javax.accessibility.AccessibleContext;
 import java.awt.Window;
 import java.util.*;
 
@@ -44,7 +45,10 @@ public class RootAccessibleNode implements AccessibleIface, ApplicationIface, Pr
                 props.put("Description", new Variant<>(""));
                 props.put("Parent", new Variant<>(
                     new AccessibleRef("org.a11y.atspi.Registry", "/org/a11y/atspi/accessible/root")));
-                props.put("ChildCount", new Variant<>(getTopLevelWindows().size()));
+                int awtCount = getTopLevelWindows().size();
+                int extCount = bridge.getExternalTopLevels().size();
+                System.out.println("java-a11y-bridge: root ChildCount queried: awt=" + awtCount + " ext=" + extCount);
+                props.put("ChildCount", new Variant<>(awtCount + extCount));
                 props.put("Locale", new Variant<>(Locale.getDefault().toString()));
                 props.put("AccessibleId", new Variant<>(""));
                 props.put("HelpText", new Variant<>(""));
@@ -68,7 +72,7 @@ public class RootAccessibleNode implements AccessibleIface, ApplicationIface, Pr
             case "Description" -> new Variant<>("");
             case "Parent" -> new Variant<>(
                 new AccessibleRef("org.a11y.atspi.Registry", "/org/a11y/atspi/accessible/root"));
-            case "ChildCount" -> new Variant<>(getTopLevelWindows().size());
+            case "ChildCount" -> new Variant<>(getTopLevelWindows().size() + bridge.getExternalTopLevels().size());
             case "Locale" -> new Variant<>(Locale.getDefault().toString());
             case "AccessibleId" -> new Variant<>("");
             case "HelpText" -> new Variant<>("");
@@ -92,21 +96,34 @@ public class RootAccessibleNode implements AccessibleIface, ApplicationIface, Pr
 
     @Override
     public List<AccessibleRef> GetChildren() {
+        List<AccessibleRef> refs = new ArrayList<>();
         var windows = getTopLevelWindows();
-        List<AccessibleRef> refs = new ArrayList<>(windows.size());
         for (Window w : windows) {
             refs.add(bridge.makeRef(((Accessible) w).getAccessibleContext()));
+        }
+        for (AccessibleContext ext : bridge.getExternalTopLevels()) {
+            refs.add(bridge.makeRef(ext));
         }
         return refs;
     }
 
     @Override
     public AccessibleRef GetChildAtIndex(int index) {
-        var windows = getTopLevelWindows();
-        if (index < 0 || index >= windows.size()) {
+        var allChildren = getAllTopLevelContexts();
+        if (index < 0 || index >= allChildren.size()) {
             return new AccessibleRef(bridge.getBusName(), A11yBridge.NULL_PATH);
         }
-        return bridge.makeRef(((Accessible) windows.get(index)).getAccessibleContext());
+        return bridge.makeRef(allChildren.get(index));
+    }
+
+    private List<AccessibleContext> getAllTopLevelContexts() {
+        List<AccessibleContext> all = new ArrayList<>();
+        var windows = getTopLevelWindows();
+        for (Window w : windows) {
+            all.add(((Accessible) w).getAccessibleContext());
+        }
+        all.addAll(bridge.getExternalTopLevels());
+        return all;
     }
 
     @Override
@@ -201,14 +218,18 @@ public class RootAccessibleNode implements AccessibleIface, ApplicationIface, Pr
     }
 
     private List<Window> getTopLevelWindows() {
-        return SwingThreadUtil.callOnEDT(() -> {
-            List<Window> result = new ArrayList<>();
-            for (Window w : Window.getWindows()) {
-                if (w.isShowing() && w instanceof Accessible) {
-                    result.add(w);
+        try {
+            if (!java.awt.Toolkit.getDefaultToolkit().getClass().getName().contains("HeadlessToolkit")) {
+                Window[] windows = Window.getWindows();
+                List<Window> result = new ArrayList<>();
+                for (Window w : windows) {
+                    if (w.isShowing() && w instanceof Accessible) {
+                        result.add(w);
+                    }
                 }
+                return result;
             }
-            return result;
-        }, Collections.emptyList());
+        } catch (Exception ignored) {}
+        return Collections.emptyList();
     }
 }

@@ -14,6 +14,7 @@ import javax.accessibility.AccessibleContext;
 import javax.accessibility.AccessibleRole;
 import java.awt.*;
 import java.awt.event.*;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -33,6 +34,7 @@ public class A11yBridge {
     private String busName;
     private final AtomicInteger nodeIdCounter = new AtomicInteger(1);
     private final Map<AccessibleContext, AccessibleNode> nodes = new ConcurrentHashMap<>();
+    private final List<AccessibleContext> externalTopLevels = Collections.synchronizedList(new ArrayList<>());
     private RootAccessibleNode rootNode;
     private final ExecutorService eventExecutor = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "a11y-events");
@@ -46,10 +48,31 @@ public class A11yBridge {
         return INSTANCE;
     }
 
+    private volatile boolean started = false;
+
     public void start() {
+        if (started) return;
+        started = true;
         Thread thread = new Thread(this::init, "a11y-bridge-init");
         thread.setDaemon(true);
         thread.start();
+    }
+
+    public boolean isReady() {
+        return a11yBus != null;
+    }
+
+    public void awaitReady(long timeoutMs) {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (!isReady() && System.currentTimeMillis() < deadline) {
+            try { Thread.sleep(50); } catch (InterruptedException e) { break; }
+        }
+    }
+
+    private volatile boolean deferEmbed = false;
+
+    public void setDeferEmbed(boolean defer) {
+        this.deferEmbed = defer;
     }
 
     private void init() {
@@ -66,20 +89,30 @@ public class A11yBridge {
             rootNode = new RootAccessibleNode(this);
             a11yBus.exportObject(ROOT_PATH, rootNode);
 
+            System.out.println("java-a11y-bridge: connected to AT-SPI2 bus as " + busName);
+
+            if (!deferEmbed) {
+                embed();
+            }
+            installEventListeners();
+        } catch (Exception e) {
+            System.err.println("java-a11y-bridge: failed to initialize");
+            e.printStackTrace();
+        }
+    }
+
+    public void embed() {
+        if (a11yBus == null) return;
+        try {
             SocketIface registry = a11yBus.getRemoteObject(
                 "org.a11y.atspi.Registry",
                 "/org/a11y/atspi/accessible/root",
                 SocketIface.class
             );
-            PlugRef plug = new PlugRef(busName, ROOT_PATH);
-            PlugRef result = registry.Embed(plug);
-
-            System.out.println("java-a11y-bridge: registered on AT-SPI2 bus as " + busName);
-
-            installEventListeners();
+            registry.Embed(new SocketIface.PlugRef(busName, ROOT_PATH));
+            System.out.println("java-a11y-bridge: registered with AT-SPI2 registry");
         } catch (Exception e) {
-            System.err.println("java-a11y-bridge: failed to initialize");
-            e.printStackTrace();
+            System.err.println("java-a11y-bridge: embed failed: " + e.getMessage());
         }
     }
 
@@ -310,6 +343,20 @@ public class A11yBridge {
                 // ignore
             }
         }
+    }
+
+    public void registerTopLevel(AccessibleContext ac) {
+        externalTopLevels.add(ac);
+        getOrCreateNode(ac);
+    }
+
+    public void unregisterTopLevel(AccessibleContext ac) {
+        externalTopLevels.remove(ac);
+        removeNode(ac);
+    }
+
+    List<AccessibleContext> getExternalTopLevels() {
+        return externalTopLevels;
     }
 
     public String getBusName() {
