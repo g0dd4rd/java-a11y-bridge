@@ -2,3 +2,13 @@ target/
 *.rpm
 *.tar.xz
 at-spi2-core-*/
+CheckVendor.java
+TestCryptoLevel.java
+TestECDSA.java
+TestSecurityProperties.java
+TestTranslations.java
+create-redhat-properties-files.bash
+java-latest-openjdk.spec
+jconsole.desktop.in
+nssadapter-*.tar.xz
+tapsets-*.tar.xz

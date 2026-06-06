@@ -1,7 +1,6 @@
 package org.a11y.fxadapter;
 
 import javafx.application.Platform;
-import javafx.beans.value.ChangeListener;
 import javafx.collections.ListChangeListener;
 import javafx.scene.Node;
 import javafx.scene.Parent;
@@ -13,6 +12,7 @@ import org.a11y.bridge.A11yBridge;
 import javax.accessibility.AccessibleContext;
 import javax.accessibility.AccessibleState;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 public class FxA11yAdapter {
@@ -20,7 +20,11 @@ public class FxA11yAdapter {
     private static final FxA11yAdapter INSTANCE = new FxA11yAdapter();
 
     private final Map<Node, FxAccessible> nodeMap = new ConcurrentHashMap<>();
+    private final Set<Scene> registeredScenes = ConcurrentHashMap.newKeySet();
+    private final Set<Window> registeredWindows = ConcurrentHashMap.newKeySet();
     private boolean initialized = false;
+    private boolean embedded = false;
+    private boolean windowListenerInstalled = false;
 
     private FxA11yAdapter() {}
 
@@ -36,7 +40,6 @@ public class FxA11yAdapter {
         if (initialized) return;
         initialized = true;
 
-        // Wait for JavaFX toolkit and windows in a background thread
         Thread watchThread = new Thread(() -> {
             A11yBridge bridge = A11yBridge.getInstance();
             bridge.setDeferEmbed(true);
@@ -44,7 +47,6 @@ public class FxA11yAdapter {
             bridge.awaitReady(10000);
             if (!bridge.isReady()) return;
 
-            // Wait for JavaFX toolkit to be available
             for (int i = 0; i < 60; i++) {
                 try {
                     Platform.runLater(() -> {});
@@ -54,31 +56,20 @@ public class FxA11yAdapter {
                 }
             }
 
-            // Wait for at least one window to appear
-            Platform.runLater(() -> waitForWindows());
+            Platform.runLater(this::attachToWindows);
         }, "fx-a11y-watcher");
         watchThread.setDaemon(true);
         watchThread.start();
     }
 
-    private void waitForWindows() {
-        if (!Window.getWindows().isEmpty()) {
-            scanWindows();
-        } else {
-            Window.getWindows().addListener((ListChangeListener<Window>) change -> {
-                while (change.next()) {
-                    if (change.wasAdded()) {
-                        Platform.runLater(this::scanWindows);
-                    }
-                }
-            });
-        }
-    }
+    private void attachToWindows() {
+        if (windowListenerInstalled) return;
+        windowListenerInstalled = true;
 
-    private void scanWindows() {
         for (Window w : Window.getWindows()) {
             handleWindowAdded(w);
         }
+
         Window.getWindows().addListener((ListChangeListener<Window>) change -> {
             while (change.next()) {
                 if (change.wasAdded()) {
@@ -91,12 +82,14 @@ public class FxA11yAdapter {
     }
 
     private void handleWindowAdded(Window window) {
+        if (!registeredWindows.add(window)) return;
+
         Scene scene = window.getScene();
         if (scene != null) {
-            walkSceneAndRegister(scene);
+            walkScene(scene);
         }
         window.sceneProperty().addListener((obs, oldScene, newScene) -> {
-            if (newScene != null) walkSceneAndRegister(newScene);
+            if (newScene != null) walkScene(newScene);
         });
 
         if (window instanceof Stage stage) {
@@ -116,38 +109,19 @@ public class FxA11yAdapter {
         }
     }
 
-    private void walkSceneAndRegister(Scene scene) {
+    private void walkScene(Scene scene) {
+        if (!registeredScenes.add(scene)) return;
+
         Parent root = scene.getRoot();
-        if (root == null) {
-            System.out.println("javafx-a11y-adapter: scene has no root");
-            return;
-        }
-        System.out.println("javafx-a11y-adapter: walking scene, root=" + root.getClass().getSimpleName());
+        if (root == null) return;
+
         FxAccessible rootAcc = getOrCreateAccessible(root, null);
         A11yBridge.getInstance().registerTopLevel(rootAcc.getAccessibleContext());
         walkNode(root, null);
-        System.out.println("javafx-a11y-adapter: " + nodeMap.size() + " nodes registered");
 
-        // Now embed with registry — ChildCount will be correct from the first query
-        A11yBridge.getInstance().embed();
-
-        // Debug: list all AT-SPI2 apps visible to see if ours is there
-        try {
-            var bus = A11yBridge.getInstance().getBus();
-            String busName = A11yBridge.getInstance().getBusName();
-            System.out.println("javafx-a11y-adapter: our bus name = " + busName);
-
-            var regAccessible = bus.getRemoteObject(
-                "org.a11y.atspi.Registry",
-                "/org/a11y/atspi/accessible/root",
-                org.a11y.bridge.atspi.AccessibleIface.class);
-            var children = regAccessible.GetChildren();
-            System.out.println("javafx-a11y-adapter: registry has " + children.size() + " apps:");
-            for (var child : children) {
-                System.out.println("  " + child.getBusName() + " " + child.getObjectPath());
-            }
-        } catch (Exception e) {
-            System.out.println("javafx-a11y-adapter: registry query failed: " + e.getMessage());
+        if (!embedded) {
+            embedded = true;
+            A11yBridge.getInstance().embed();
         }
     }
 
@@ -186,8 +160,7 @@ public class FxA11yAdapter {
     FxAccessible getOrCreateAccessible(Node node, FxAccessible parent) {
         return nodeMap.computeIfAbsent(node, n -> {
             FxAccessible acc = new FxAccessible(n, parent);
-            A11yBridge bridge = A11yBridge.getInstance();
-            bridge.getOrCreateNode(acc.getAccessibleContext());
+            A11yBridge.getInstance().getOrCreateNode(acc.getAccessibleContext());
             return acc;
         });
     }
@@ -196,39 +169,21 @@ public class FxA11yAdapter {
         AccessibleContext ctx = acc.getAccessibleContext();
 
         node.focusedProperty().addListener((obs, was, is) -> {
-            if (is) {
-                firePropertyChange(ctx,
-                    AccessibleContext.ACCESSIBLE_STATE_PROPERTY,
-                    null, AccessibleState.FOCUSED);
-            } else {
-                firePropertyChange(ctx,
-                    AccessibleContext.ACCESSIBLE_STATE_PROPERTY,
-                    AccessibleState.FOCUSED, null);
-            }
+            firePropertyChange(ctx, AccessibleContext.ACCESSIBLE_STATE_PROPERTY,
+                is ? null : AccessibleState.FOCUSED,
+                is ? AccessibleState.FOCUSED : null);
         });
 
         node.visibleProperty().addListener((obs, was, is) -> {
-            if (is) {
-                firePropertyChange(ctx,
-                    AccessibleContext.ACCESSIBLE_STATE_PROPERTY,
-                    null, AccessibleState.VISIBLE);
-            } else {
-                firePropertyChange(ctx,
-                    AccessibleContext.ACCESSIBLE_STATE_PROPERTY,
-                    AccessibleState.VISIBLE, null);
-            }
+            firePropertyChange(ctx, AccessibleContext.ACCESSIBLE_STATE_PROPERTY,
+                is ? null : AccessibleState.VISIBLE,
+                is ? AccessibleState.VISIBLE : null);
         });
 
         node.disabledProperty().addListener((obs, was, is) -> {
-            if (!is) {
-                firePropertyChange(ctx,
-                    AccessibleContext.ACCESSIBLE_STATE_PROPERTY,
-                    null, AccessibleState.ENABLED);
-            } else {
-                firePropertyChange(ctx,
-                    AccessibleContext.ACCESSIBLE_STATE_PROPERTY,
-                    AccessibleState.ENABLED, null);
-            }
+            firePropertyChange(ctx, AccessibleContext.ACCESSIBLE_STATE_PROPERTY,
+                is ? AccessibleState.ENABLED : null,
+                is ? null : AccessibleState.ENABLED);
         });
     }
 
